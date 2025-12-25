@@ -1,0 +1,17 @@
+# Service Component Config
+schemaVersion: 1.0
+type: component
+version: 1.0
+component:
+    name: breaking-bad-v4
+    type: service
+    build:
+        docker:
+            context: .
+            dockerfile: Dockerfile
+    run:
+        endpoints:
+            - name: http-server
+              port: 8080
+              type: http
+              networkVisibility: Public
