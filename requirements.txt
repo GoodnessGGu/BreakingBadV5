@@ -1,0 +1,14 @@
+python-telegram-bot
+httpx
+iqoptionapi
+pandas
+numpy
+scikit-learn
+joblib
+pytz
+python-dotenv
+websockets
+telethon
+websocket-client
+requests
+flask
