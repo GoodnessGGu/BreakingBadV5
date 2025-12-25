@@ -90,7 +90,7 @@ class WebSocketManager:
         self.websocket.send(data)
         return request_id
     
-    def _on_message(self, message):
+    def _on_message(self, ws, message):
         """
         Handle incoming WebSocket messages.
         """
@@ -102,14 +102,14 @@ class WebSocketManager:
         except json.JSONDecodeError as e:
             print(f"Error parsing message: {e}")
     
-    def _on_error(self, error):
+    def _on_error(self, ws, error):
         """
         Handle WebSocket connection errors.
         """
         print(f"### WebSocket Error: {error} ###")
         self.ws_is_open = False
     
-    def _on_open(self):
+    def _on_open(self, ws):
         """
         Handle WebSocket connection opened event.
         """
@@ -117,7 +117,7 @@ class WebSocketManager:
         self.ws_is_open = True
         pass
 
-    def _on_close(self):
+    def _on_close(self, ws, close_status_code, close_msg):
         """
         Handle WebSocket connection closed event.
         """
