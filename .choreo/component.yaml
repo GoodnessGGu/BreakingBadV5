@@ -1,7 +1,7 @@
 # Service Component Config
-schemaVersion: 1.0
+schemaVersion: 1.2
 type: component
-version: 1.0
+version: 1.2
 component:
     name: breaking-bad-v4
     type: service
