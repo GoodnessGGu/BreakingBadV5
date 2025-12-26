@@ -3,7 +3,7 @@ import numpy as np
 import joblib
 import os
 import logging
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 
@@ -13,6 +13,72 @@ logger = logging.getLogger(__name__)
 
 MODELS_DIR = "models"
 MODEL_PATH = os.path.join(MODELS_DIR, "trade_model.pkl")
+
+# ... (Indicators remain unchanged) ...
+
+def train_model(data_path="training_data.csv"):
+    """
+    Trains an XGBoost model using labeled data.
+    """
+    if not os.path.exists(data_path):
+        logger.error(f"Data file not found: {data_path}")
+        return
+    
+    logger.info("Loading data...")
+    df = pd.read_csv(data_path)
+    
+    # Separate features (X) and target (y)
+    if 'outcome' not in df.columns:
+        logger.error("Data missing 'outcome' column.")
+        return
+
+    # DROP RAW COLUMNS explicitly here to force model to learn from normalized features only
+    drop_raw = ['open', 'close', 'min', 'max', 'volume', 'sma_20', 'sma_50', 'bb_upper', 'bb_lower']
+    
+    # Also drop metadata
+    drop_meta = ['time', 'outcome', 'signal', 'asset', 'from', 'to']
+    
+    # Combine drops
+    annotated_cols = drop_raw + drop_meta
+    
+    X = df.drop(columns=[c for c in annotated_cols if c in df.columns])
+    
+    # 2. Drop NaNs from X and align y
+    X = X.dropna()
+    y = df.loc[X.index, 'outcome'] # Align y with cleaned X
+    
+    # Split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    logger.info("Training XGBoost Classifier...")
+    
+    # XGBoost Configuration
+    clf = XGBClassifier(
+        n_estimators=500,
+        learning_rate=0.05,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        eval_metric='logloss',
+        random_state=42,
+        n_jobs=-1
+    )
+    
+    clf.fit(X_train, y_train)
+    
+    # Evaluate
+    y_pred = clf.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    logger.info(f"Model Accuracy: {acc:.2f}")
+    logger.info("\n" + classification_report(y_test, y_pred))
+    
+    # Save
+    if not os.path.exists(MODELS_DIR):
+        os.makedirs(MODELS_DIR)
+        
+    joblib.dump(clf, MODEL_PATH)
+    logger.info(f"Model saved to {MODEL_PATH}")
+    return clf
 
 # --- Indicators ---
 def calculate_rsi(series, period=14):
@@ -162,19 +228,131 @@ def prepare_features(df):
     
     prev_open = df['open'].shift(1)
     prev_close = df['close'].shift(1)
+    prev_high = df['max'].shift(1)
+    prev_low = df['min'].shift(1)
+    
     curr_open = df['open']
     curr_close = df['close']
+    curr_high = df['max']
+    curr_low = df['min']
     
-    # Vectorized Engulfing Logic
-    is_bullish_engulfing = (prev_close < prev_open) & (curr_close > curr_open) & \
-                           (curr_open < prev_close) & (curr_close > prev_open)
-                           
-    is_bearish_engulfing = (prev_close > prev_open) & (curr_close < curr_open) & \
-                           (curr_open > prev_close) & (curr_close < prev_open)
-                           
+    # Pre-calculate Candle Properties
+    body_size = (curr_close - curr_open).abs()
+    mean_body_size = body_size.rolling(10).mean()
+    long_candle = body_size > (mean_body_size * 1.0) # Not super huge, just significant
+    
+    is_green = curr_close > curr_open
+    is_red = curr_close < curr_open
+    
+    prev_is_green = prev_close > prev_open
+    prev_is_red = prev_close < prev_open
+    
+    # 1. Engulfing
+    is_bullish_engulfing = prev_is_red & is_green & (curr_open < prev_close) & (curr_close > prev_open)
+    is_bearish_engulfing = prev_is_green & is_red & (curr_open > prev_close) & (curr_close < prev_open)
+    
     df['pattern_engulfing'] = 0
     df.loc[is_bullish_engulfing, 'pattern_engulfing'] = 1
     df.loc[is_bearish_engulfing, 'pattern_engulfing'] = -1
+    
+    # 2. Pinbar (Hammer / Shooting Star)
+    # Logic: Wick is 2x larger than body, and body is in top/bottom 30% of range
+    total_range = curr_high - curr_low
+    upper_wick = curr_high - df[['open', 'close']].max(axis=1)
+    lower_wick = df[['open', 'close']].min(axis=1) - curr_low
+    
+    is_small_body = body_size <= (total_range * 0.3)
+    
+    # Bullish Pinbar (Hammer): Long Lower Wick
+    is_bullish_pinbar = is_small_body & (lower_wick >= (2 * body_size)) & (lower_wick > upper_wick)
+    # Bearish Pinbar (Shooting Star): Long Upper Wick
+    is_bearish_pinbar = is_small_body & (upper_wick >= (2 * body_size)) & (upper_wick > lower_wick)
+    
+    df['pattern_pinbar'] = 0
+    df.loc[is_bullish_pinbar, 'pattern_pinbar'] = 1
+    df.loc[is_bearish_pinbar, 'pattern_pinbar'] = -1
+    
+    # 3. Marubozu (Momentum)
+    # Logic: Huge body, tiny wicks
+    is_marubozu = (body_size > (mean_body_size * 1.5)) & \
+                  (upper_wick < (body_size * 0.1)) & \
+                  (lower_wick < (body_size * 0.1))
+                  
+    df['pattern_marubozu'] = 0
+    df.loc[is_marubozu & is_green, 'pattern_marubozu'] = 1
+    df.loc[is_marubozu & is_red, 'pattern_marubozu'] = -1
+    
+    # 4. Three White Soldiers / Black Crows (Continuity)
+    # Logic: 3 consecutive green/red candles with decent bodies
+    prev2_close = df['close'].shift(2)
+    prev2_open = df['open'].shift(2)
+    prev2_is_green = prev2_close > prev2_open
+    prev2_is_red = prev2_close < prev2_open
+    
+    is_3_soldiers = prev2_is_green & prev_is_green & is_green & \
+                    (curr_close > prev_close) & (prev_close > prev2_close)
+                    
+    is_3_crows = prev2_is_red & prev_is_red & is_red & \
+                 (curr_close < prev_close) & (prev_close < prev2_close)
+                 
+    df['pattern_3soldiers'] = 0
+    df.loc[is_3_soldiers, 'pattern_3soldiers'] = 1
+    df.loc[is_3_crows, 'pattern_3soldiers'] = -1
+    
+    # 5. Morning / Evening Star (Reversal)
+    # Logic: Big Red (2 ago), Small Star (1 ago), Big Green (curr)
+    star_body = (prev_close - prev_open).abs()
+    prev2_body = (prev2_close - prev2_open).abs()
+    
+    is_morning_star = prev2_is_red & (prev2_body > mean_body_size) & \
+                      (star_body < (mean_body_size * 0.5)) & \
+                      is_green & (curr_close > (prev2_close + prev2_open)/2) # Closes > 50% of first candle
+                      
+    is_evening_star = prev2_is_green & (prev2_body > mean_body_size) & \
+                      (star_body < (mean_body_size * 0.5)) & \
+                      is_red & (curr_close < (prev2_close + prev2_open)/2)
+                      
+    df['pattern_star'] = 0
+    df.loc[is_morning_star, 'pattern_star'] = 1
+    df.loc[is_evening_star, 'pattern_star'] = -1
+    
+    # 6. Tweezer Top / Bottom (Support/Resistance)
+    # Logic: Equal Highs or Lows (within very small margin)
+    is_tweezer_bottom = (curr_low - prev_low).abs() < (curr_close * 0.0001)
+    is_tweezer_top = (curr_high - prev_high).abs() < (curr_close * 0.0001)
+    
+    df['pattern_tweezer'] = 0
+    df.loc[is_tweezer_bottom, 'pattern_tweezer'] = 1 # Potential Bullish Reversal
+    df.loc[is_tweezer_top, 'pattern_tweezer'] = -1 # Potential Bearish Reversal
+    
+    # 7. Piercing Line / Dark Cloud (Weak Reversal)
+    # Logic: 2nd candle opens gap, closes > 50% into previous
+    midpoint_prev = (prev_open + prev_close) / 2
+    
+    is_piercing = prev_is_red & is_green & (curr_open < prev_close) & (curr_close > midpoint_prev)
+    is_dark_cloud = prev_is_green & is_red & (curr_open > prev_close) & (curr_close < midpoint_prev)
+    
+    df['pattern_piercing'] = 0
+    df.loc[is_piercing, 'pattern_piercing'] = 1
+    df.loc[is_dark_cloud, 'pattern_piercing'] = -1
+    
+    # 8. Three Inside Up / Down (Confirmed Reversal)
+    # Logic: Harami (Mother/Baby) -> Validation Candle
+    # Candle 3 (Curr) breaks out of Candle 1 (Prev2) range
+    
+    prev2_high = df['max'].shift(2)
+    prev2_low = df['min'].shift(2)
+    
+    # Harami (Prev2 = Mother, Prev = Baby)
+    is_bullish_harami = prev2_is_red & prev_is_green & (prev_high < prev2_open) & (prev_low > prev2_close)
+    is_bearish_harami = prev2_is_green & prev_is_red & (prev_high < prev2_close) & (prev_low > prev2_open)
+    
+    is_inside_up = is_bullish_harami & is_green & (curr_close > prev2_high)
+    is_inside_down = is_bearish_harami & is_red & (curr_close < prev2_low)
+    
+    df['pattern_inside'] = 0
+    df.loc[is_inside_up, 'pattern_inside'] = 1
+    df.loc[is_inside_down, 'pattern_inside'] = -1
 
     # 5. Lagged Features (Percent Change)
     for lag in [1, 2, 3]:
@@ -190,64 +368,7 @@ def prepare_features(df):
     
     return df
 
-def train_model(data_path="training_data.csv"):
-    """
-    Trains a Gradient Boosting model using labeled data.
-    """
-    if not os.path.exists(data_path):
-        logger.error(f"Data file not found: {data_path}")
-        return
-    
-    logger.info("Loading data...")
-    df = pd.read_csv(data_path)
-    
-    # Separate features (X) and target (y)
-    if 'outcome' not in df.columns:
-        logger.error("Data missing 'outcome' column.")
-        return
 
-    # DROP RAW COLUMNS explicitly here to force model to learn from normalized features only
-    drop_raw = ['open', 'close', 'min', 'max', 'volume', 'sma_20', 'sma_50', 'bb_upper', 'bb_lower']
-    
-    # Also drop metadata
-    drop_meta = ['time', 'outcome', 'signal', 'asset', 'from', 'to']
-    
-    # Combine drops
-    annotated_cols = drop_raw + drop_meta
-    
-    X = df.drop(columns=[c for c in annotated_cols if c in df.columns])
-    
-    # 2. Drop NaNs from X and align y
-    # Indicators like RSI/SMA introduce NaNs at start. Model crashes if they exist.
-    X = X.dropna()
-    y = df.loc[X.index, 'outcome'] # Align y with cleaned X
-    # Split
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    logger.info("Training Gradient Boosting Classifier...")
-    clf = GradientBoostingClassifier(
-        n_estimators=200, 
-        learning_rate=0.05,
-        max_depth=5,
-        min_samples_split=10, 
-        min_samples_leaf=5,
-        random_state=42
-    )
-    clf.fit(X_train, y_train)
-    
-    # Evaluate
-    y_pred = clf.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    logger.info(f"Model Accuracy: {acc:.2f}")
-    logger.info("\n" + classification_report(y_test, y_pred))
-    
-    # Save
-    if not os.path.exists(MODELS_DIR):
-        os.makedirs(MODELS_DIR)
-        
-    joblib.dump(clf, MODEL_PATH)
-    logger.info(f"Model saved to {MODEL_PATH}")
-    return clf
 
 def load_model():
     """Loads the trained model."""
@@ -258,7 +379,7 @@ def load_model():
             logger.error(f"Failed to load model: {e}")
     return None
 
-def predict_signal(model, features_df):
+def predict_signal(model, features_df, direction=None):
     """
     Predicts outcome for a single row of features.
     Returns: 1 (Win) or 0 (Loss)
@@ -267,51 +388,43 @@ def predict_signal(model, features_df):
         return 1 # Fallback: Assume win if no model
         
     try:
-        # Align features with model
-        # Explicitly copy to avoid SettingWithCopyWarning if input is a slice
-        features_df = features_df.copy()
-
+        # 1. Preserve Raw Features for Logic (ADX, SMA, etc.)
+        # These columns exist in the input features_df (from prepare_features)
+        raw_sma50 = features_df['sma_50'].iloc[0] if 'sma_50' in features_df.columns else None
+        raw_adx = features_df['adx'].iloc[0] if 'adx' in features_df.columns else None
+        raw_close = features_df['close'].iloc[0] if 'close' in features_df.columns else None
+        
+        # 2. Align features for Model (XGBoost)
+        # We must filter to ONLY the features the model expects, and fill missing with 0
+        model_input = features_df.copy()
+        
         if hasattr(model, "feature_names_in_"):
-            # Only keep columns that the model knows
-            # Add missing columns as 0 (if any, though unlikely if prepare_features is consistent)
-            valid_cols = [c for c in model.feature_names_in_ if c in features_df.columns]
+            # Add missing columns as 0
+            missing = set(model.feature_names_in_) - set(model_input.columns)
+            for c in missing:
+                model_input.loc[:, c] = 0
             
-            if len(valid_cols) < len(model.feature_names_in_):
-                missing = set(model.feature_names_in_) - set(features_df.columns)
-                # Ignore expected missing training columns
-                ignored_cols = {'next_close', 'next_open', 'outcome', 'at'}
-                real_missing = missing - ignored_cols
-                
-                if real_missing:
-                    logger.warning(f"Missing features for prediction: {real_missing}")
-                
-                # Optional: Add missing as 0 or fail. For now, let's try to proceed with what we have if possible, 
-                # but sklearn usually strictly requires all features in order.
-                for c in missing:
-                    features_df.loc[:, c] = 0
+            # Select and Reorder to match model
+            model_input = model_input[model.feature_names_in_]
             
-            # Reorder columns to match model
-            features_df = features_df[model.feature_names_in_]
+        # 3. Model Prediction (Probability)
+        proba = model.predict_proba(model_input)
+        win_prob = proba[0][1] # Probability of Class 1 (Win)
+        
+        # 4. Balanced Precision Filters
+        threshold = 0.65
+        
+        # A) Confidence Check
+        if win_prob < threshold:
+            return 0
             
-            features_df = features_df[model.feature_names_in_]
+        # B) Choppy Market Filter (ADX)
+        if raw_adx is not None and raw_adx < 22:
+             # logger.info(f"AI REJECT: ADX Weak ({raw_adx:.1f})")
+             return 0
             
-        # prediction = model.predict(features_df)
-        # return prediction[0]
-        
-        # Use Probability instead of hard prediction
-        proba = model.predict_proba(features_df)
-        # proba returns [[prob_0, prob_1]]
-        
-        loss_prob = proba[0][0]
-        win_prob = proba[0][1]
-        
-        # Confidence Threshold: Only trade if model is > 55% sure it's a WIN
-        threshold = 0.55 
-        
-        if win_prob >= threshold:
-            return 1
-        else:
-            return 0 # Treat as Loss (Reject)
+        return 1 # Approved
+
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         return 1 # Fallback

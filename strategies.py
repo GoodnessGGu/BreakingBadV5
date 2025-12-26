@@ -32,17 +32,22 @@ def reload_ai_model():
         logger.error(f"❌ Error reloading AI model: {e}")
         return False
 
-def wma(series, period):
-    """Calculates Weighted Moving Average."""
-    return series.rolling(period).apply(
-        lambda x: ((x * np.arange(1, period + 1)).sum()) / np.arange(1, period + 1).sum(), 
-        raw=True
-    )
+# --- Pattern Recognition Configuration (Modular) ---
+PATTERN_CONFIG = {
+    'engulfing': True,
+    'pinbar': True,
+    'star': True,
+    '3soldiers': False,
+    'tweezer': False,
+    'inside': False,
+    'piercing': False,
+    'marubozu': False
+}
 
 def analyze_strategy(candles_data, use_ai=True):
     """
-    Analyzes candle data and returns a signal ('CALL', 'PUT', or None).
-    Implements Bollinger Band + RSI Mean Reversion Strategy.
+    Analyzes candle data and returns a signal ('CALL', 'PUT', or None)
+    based on Modular Candlestick Patterns + AI Confirmation.
     """
     if not candles_data or len(candles_data) < 35:
         return None
@@ -66,62 +71,70 @@ def analyze_strategy(candles_data, use_ai=True):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c])
             
-    # --- Strategy: Bollinger Band + RSI Mean Reversion ---
-    # Best for OTC / Ranging Markets
+    # --- Strategy: Modular Pattern Recognition ---
     
-    # 1. Bollinger Bands (20, 2)
-    df['sma_20'] = df['close'].rolling(window=20).mean()
-    df['std_20'] = df['close'].rolling(window=20).std()
-    df['bb_upper'] = df['sma_20'] + (df['std_20'] * 2.0)
-    df['bb_lower'] = df['sma_20'] - (df['std_20'] * 2.0)
-    
-    # 2. RSI (14)
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
+    # 1. Feature Engineering (Detects patterns)
+    try:
+        df_features = prepare_features(df)
+        if df_features.empty:
+            return None
+        
+        # Get latest fully closed candle analysis (since we trade on Close)
+        # Actually pattern detection uses current row (which may be closed candle in backtest)
+        # In live trading, we pass closed candles.
+        curr = df_features.iloc[-1]
+        
+    except Exception as e:
+        logger.error(f"Feature calculation failed: {e}")
+        return None
 
-    # Get Previous Completed Candle (c1)
-    curr = df.iloc[-2] 
-    
-    # Limits (Relaxed for more volume)
-    RSI_OVERBOUGHT = 65  # Was 70
-    RSI_OVERSOLD = 35    # Was 30
-    
     signal = None
 
-    # CALL SIGNAL:
-    # Relaxed: Price is below or extremely close to Lower Band (within 0.1%)
-    # OR RSI is simply Oversold
+    # 2. Iterate Configured Patterns
+    # If ANY enabled pattern triggers, we take the signal.
+    # Priority: If multiple patterns conflicts, we can default to None or prioritize specific ones.
+    # Here: First match wins (or we can sum up scores if we wanted).
     
-    # Check "Near Lower Band": (Close <= Lower Band * 1.001)
-    near_lower = curr['close'] <= (curr['bb_lower'] * 1.0005)
-    near_upper = curr['close'] >= (curr['bb_upper'] * 0.9995)
+    triggered_pattern = None
     
-    if near_lower and curr['rsi'] < RSI_OVERSOLD:
-        signal = "CALL"
-        
-    # PUT SIGNAL:
-    # Relaxed: Price is above or extremely close to Upper Band
-    elif near_upper and curr['rsi'] > RSI_OVERBOUGHT:
-        signal = "PUT"
+    # Map pattern columns to our config keys
+    # Column format: 'pattern_name' -> Config key: 'name'
+    for key, enabled in PATTERN_CONFIG.items():
+        if enabled:
+            col_name = f'pattern_{key}'
+            if col_name in curr:
+                val = curr[col_name]
+                if val == 1:
+                    signal = "CALL"
+                    triggered_pattern = key
+                    break # Stop at first detected pattern
+                elif val == -1:
+                    signal = "PUT"
+                    triggered_pattern = key
+                    break # Stop at first detected pattern
+
+    if not signal:
+        return None
+
+    # logger.info(f"Pattern Detected: {triggered_pattern} -> {signal}")
 
     # --- AI Confirmation ---
     if signal and ai_model and use_ai:
         try:
-            df_features = prepare_features(df)
+            # We already have df_features
+            current_features = df_features.iloc[[-1]]
             
-            # We need the last row (current candle) for context
-            if not df_features.empty:
-                current_features = df_features.iloc[[-1]]
-                prediction = predict_signal(ai_model, current_features)
+            # Encode direction for AI (1=CALL, -1=PUT)
+            dir_val = 1 if signal == "CALL" else -1
+            
+            prediction = predict_signal(ai_model, current_features, direction=dir_val)
+            
+            if prediction == 0: # 0 = Loss/Reject
+                logger.info(f"[AI] REJECTED {signal} ({triggered_pattern}) on {df.iloc[-1].get('time', 'unknown')}")
+                return None
+            else:
+                logger.info(f"[AI] APPROVED {signal} ({triggered_pattern}).")
                 
-                if prediction == 0: # 0 = Loss/Reject
-                    logger.info(f"[AI] REJECTED {signal} signal on {df.iloc[-1].get('time', 'unknown')}")
-                    return None
-                else:
-                    logger.info(f"[AI] APPROVED {signal} signal.")
         except Exception as e:
             logger.error(f"AI Prediction failed: {e}")
             pass
@@ -162,7 +175,10 @@ def confirm_trade_with_ai(candles_data, direction):
             
         current_features = df_features.iloc[[-1]]
         
-        prediction = predict_signal(ai_model, current_features)
+        # Encode direction (Assuming direction string like 'CALL' or 'PUT')
+        dir_val = 1 if 'CALL' in str(direction).upper() else -1
+        
+        prediction = predict_signal(ai_model, current_features, direction=dir_val)
         
         if prediction == 0:
             logger.info(f"[AI] REJECTED external {direction} signal.")

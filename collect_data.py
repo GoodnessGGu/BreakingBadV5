@@ -112,9 +112,7 @@ async def run_collection_cycle(api_instance=None):
 
         # Collect data for a few assets to generalize better
         assets = [
-            "EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC", 
-            "AUDCAD-OTC", "NZDUSD-OTC", "USDCHF-OTC", 
-            "EURGBP-OTC", "USDCAD-OTC"
+            "EURUSD-OTC", "GBPUSD-OTC"
         ]
         all_data = []
         

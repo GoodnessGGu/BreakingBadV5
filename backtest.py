@@ -132,69 +132,58 @@ async def main():
     api = IQOptionAPI()
     await api._connect()
     
-    asset = "GBPUSD-OTC"
-    timeframe = 60 # 1 minute
-    count = 1000   # Number of candles to test
-    max_gales = 3  # Testing with Martingale
+    logger.info("✅ Connected to IQ Option API (PRACTICE)")
     
-    df = await fetch_historical_data(api, asset, timeframe, count)
-    if df is None: return
-        
-    df = apply_strategy(df)
-    df = simulate_trades(df, max_gales=max_gales)
+    assets = ["GBPUSD-OTC", "EURUSD-OTC", "EURGBP-OTC"]
+    timeframe = 60 
+    count = 1000   
     
-    # --- Statistics ---
-    # Filter only rows where a trade occurred
-    trades = df[df['trade_action'].isin([1, -1])].copy()
-    
-    total_trades = len(trades)
-    wins = trades['win'].sum()
-    losses = total_trades - wins
-    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
-    total_pnl = trades['pnl'].sum()
-    
-    # Calculate cumulative PnL for the report
-    trades['cumulative_pnl'] = trades['pnl'].cumsum()
-    
-    # Count gales
-    gale_counts = trades['gale_level'].value_counts().sort_index()
-    
-    print(f"\n{'='*40}")
-    print(f"BACKTEST REPORT: {asset}")
-    print(f"{'='*40}")
-    print(f"Timeframe:      {timeframe}s")
-    print(f"Candles:        {len(df)}")
-    print(f"Total Trades:   {total_trades}")
-    print(f"Wins:           {wins}")
-    print(f"Losses:         {losses}")
-    print(f"Win Rate:       {win_rate:.2f}%")
-    print(f"Est. PnL:       ${total_pnl:.2f}")
-    print(f"{'-'*40}")
-    print("Martingale Breakdown:")
-    for g, count in gale_counts.items():
-        if g == 0: label = "Direct Win"
-        elif g <= max_gales: label = f"Gale {g} Win"
-        else: label = f"Full Loss (Gale {max_gales})"
-        print(f"  {label}: {count}")
-    print(f"{'='*40}\n")
-    
-    if total_trades > 0:
-        print("Last 10 Trades:")
-        print(trades[['time', 'trade_action', 'win', 'gale_level', 'pnl', 'cumulative_pnl']].tail(10))
-        
-        # Export to Excel
-        try:
-            filename = f"backtest_{asset}_{timeframe}s.xlsx"
-            # Format for cleaner Excel output
-            export_df = trades[['time', 'open', 'close', 'trade_action', 'win', 'gale_level', 'pnl', 'cumulative_pnl']].copy()
-            export_df['trade_action'] = export_df['trade_action'].apply(lambda x: 'CALL' if x == 1 else 'PUT')
-            export_df['result'] = export_df['win'].apply(lambda x: 'WIN' if x else 'LOSS')
-            export_df = export_df[['time', 'trade_action', 'open', 'close', 'result', 'gale_level', 'pnl', 'cumulative_pnl']]
+    for asset in assets:
+        logger.info(f"\n --- STARTING BACKTEST FOR {asset} ---")
+        df = await fetch_historical_data(api, asset, timeframe, count)
+        if df is None: continue
             
-            export_df.to_excel(filename, index=False)
-            print(f"\nDetailed report saved to: {filename}")
-        except Exception as e:
-            logger.error(f"Failed to save Excel report: {e}")
+        max_gales = 0  # No Martingale (XGBoost Precision Mode)
+        
+        df = apply_strategy(df)
+        df = simulate_trades(df, max_gales=max_gales)
+        
+        # --- Statistics ---
+        trades = df[df['trade_action'].isin([1, -1])].copy()
+        
+        total_trades = len(trades)
+        wins = len(trades[trades['win'] == True])
+        losses = total_trades - wins
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+        total_pnl = trades['pnl'].sum()
+        trades['cumulative_pnl'] = trades['pnl'].cumsum()
+        
+        print(f"\n{'='*40}")
+        print(f"BACKTEST REPORT: {asset}")
+        print(f"{'='*40}")
+        print(f"Timeframe:      {timeframe}s")
+        print(f"Candles:        {len(df)}")
+        print(f"Total Trades:   {total_trades}")
+        print(f"Wins:           {wins}")
+        print(f"Losses:         {losses}")
+        print(f"Win Rate:       {win_rate:.2f}%")
+        print(f"Est. PnL:       ${total_pnl:.2f}")
+        print(f"{'-'*40}")
+        
+        if total_trades > 0:
+            print("Last 10 Trades:")
+            print(trades[['time', 'trade_action', 'win', 'gale_level', 'pnl']].tail(10))
+            
+            try:
+                filename = f"backtest_{asset}_{timeframe}s.xlsx"
+                trades.to_excel(filename, index=False)
+                print(f"Detailed report saved to: {filename}")
+            except Exception as e:
+                logger.error(f"Failed to save Excel: {e}")
+        else:
+            print("No trades found.")
+        print(f"{'='*40}\n")
 
+    api.websocket.close()
 if __name__ == "__main__":
     asyncio.run(main())

@@ -12,3 +12,5 @@ telethon
 websocket-client
 requests
 flask
+
+xgboost
