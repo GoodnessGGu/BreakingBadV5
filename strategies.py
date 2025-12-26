@@ -37,6 +37,7 @@ PATTERN_CONFIG = {
     'engulfing': True,
     'pinbar': True,
     'star': True,
+    'exhaustion': True,
     '3soldiers': False,
     'tweezer': False,
     'inside': False,

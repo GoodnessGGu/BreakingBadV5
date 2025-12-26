@@ -354,6 +354,22 @@ def prepare_features(df):
     df.loc[is_inside_up, 'pattern_inside'] = 1
     df.loc[is_inside_down, 'pattern_inside'] = -1
 
+    # 9. Exhaustion (Mean Reversal - Small then Big)
+    # Logic: 
+    # 1. Two consecutive candles of SAME COLOR.
+    # 2. Body of Current >= 2 * Body of Previous.
+    # 3. Signal is REVERSAL (Call if Red-Red, Put if Green-Green).
+    
+    prev_body = (prev_close - prev_open).abs()
+    curr_body = (curr_close - curr_open).abs()
+    
+    is_exhaustion_call = prev_is_red & is_red & (curr_body >= (2 * prev_body))
+    is_exhaustion_put = prev_is_green & is_green & (curr_body >= (2 * prev_body))
+    
+    df['pattern_exhaustion'] = 0
+    df.loc[is_exhaustion_call, 'pattern_exhaustion'] = 1   # Signal CALL
+    df.loc[is_exhaustion_put, 'pattern_exhaustion'] = -1  # Signal PUT
+
     # 5. Lagged Features (Percent Change)
     for lag in [1, 2, 3]:
         # Log Returns or Simple Returns
