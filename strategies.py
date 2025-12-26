@@ -88,32 +88,28 @@ def analyze_strategy(candles_data, use_ai=True):
     # Get Previous Completed Candle (c1)
     curr = df.iloc[-2] 
     
-    # Limits
+    # Limits (Strict Mean Reversion)
     RSI_OVERBOUGHT = 65
     RSI_OVERSOLD = 35
     
     signal = None
 
-    # Trend Logic:
-    # UPTREND: Close > EMA 50 (Only look for CALLs)
-    # DOWNTREND: Close < EMA 50 (Only look for PUTs)
-    is_uptrend = curr['close'] > curr['ema_50']
-    is_downtrend = curr['close'] < curr['ema_50']
+    # Trend Logic: (Disabled for Volume Test)
+    # is_uptrend = curr['close'] > curr['ema_50']
+    # is_downtrend = curr['close'] < curr['ema_50']
 
     # CALL SIGNAL:
-    # Rule 1: Must be in Uptrend (Trend Filter)
-    # Rule 2: Price dip to Lower Band OR Oversold
+    # Rule: Price dip to Lower Band (Strict) + Oversold
     near_lower = curr['close'] <= (curr['bb_lower'] * 1.0005)
     
-    if is_uptrend and near_lower and curr['rsi'] < RSI_OVERSOLD:
+    if near_lower and curr['rsi'] < RSI_OVERSOLD:
         signal = "CALL"
         
     # PUT SIGNAL:
-    # Rule 1: Must be in Downtrend (Trend Filter)
-    # Rule 2: Price rally to Upper Band OR Overbought
+    # Rule: Price rally to Upper Band (Strict) + Overbought
     near_upper = curr['close'] >= (curr['bb_upper'] * 0.9995)
     
-    if is_downtrend and near_upper and curr['rsi'] > RSI_OVERBOUGHT:
+    if near_upper and curr['rsi'] > RSI_OVERBOUGHT:
         signal = "PUT"
 
     # --- AI Confirmation ---
