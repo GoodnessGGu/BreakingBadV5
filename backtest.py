@@ -2,6 +2,13 @@ import asyncio
 import pandas as pd
 import numpy as np
 import logging
+import os
+from dotenv import load_dotenv
+
+# Load env variables
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+load_dotenv(env_path)
+
 from iqclient import IQOptionAPI
 from strategies import analyze_strategy
 
@@ -129,19 +136,42 @@ def simulate_trades(df, max_gales=2):
     return df
 
 async def main():
-    api = IQOptionAPI()
-    await api._connect()
+    email = os.getenv("IQ_EMAIL") or os.getenv("email")
+    password = os.getenv("IQ_PASSWORD") or os.getenv("password")
     
-    asset = "GBPUSD-OTC"
-    timeframe = 60 # 1 minute
-    count = 1000   # Number of candles to test
-    max_gales = 2  # Martingale ON (Required for Reversion Strategy)
+    api = None
+    df = None
     
-    df = await fetch_historical_data(api, asset, timeframe, count)
+    if not email:
+        logger.warning("Credentials not found. Switching to OFFLINE MODE using training_data.csv")
+        if os.path.exists("training_data.csv"):
+            df = pd.read_csv("training_data.csv")
+            if 'time' in df.columns:
+                 df['time'] = pd.to_datetime(df['time'])
+            
+            # Map column names if they differ in training data
+            # training_data.csv usually has: open,close,min,max,volume...
+            logger.info(f"Loaded {len(df)} candles from training_data.csv")
+        else:
+             logger.error("No credentials and no training_data.csv found. Exiting.")
+             return
+    else:
+        api = IQOptionAPI(email=email, password=password)
+        await api._connect()
+        asset = "GBPUSD-OTC"
+        timeframe = 60 # 1 minute
+        count = 1000   # Number of candles to test
+        df = await fetch_historical_data(api, asset, timeframe, count)
+
     if df is None: return
         
+    max_gales = 2  # Martingale ON (Required for Reversion Strategy)
+    
     df = apply_strategy(df)
     df = simulate_trades(df, max_gales=max_gales)
+    
+    # Rest of script matches original flow...
+
     
     # --- Statistics ---
     # Filter only rows where a trade occurred

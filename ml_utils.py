@@ -4,8 +4,16 @@ import joblib
 import os
 import logging
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
+
+# ... (rest of imports)
+
+# ... (rest of imports)
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -224,15 +232,25 @@ def train_model(data_path="training_data.csv"):
     # Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    logger.info("Training Gradient Boosting Classifier...")
-    clf = GradientBoostingClassifier(
-        n_estimators=200, 
-        learning_rate=0.05,
-        max_depth=5,
-        min_samples_split=10, 
-        min_samples_leaf=5,
-        random_state=42
+    logger.info("Training Neural Network (MLP Classifier)...")
+    clf = make_pipeline(
+        StandardScaler(),
+        MLPClassifier(
+            hidden_layer_sizes=(100, 50),
+            activation='relu',
+            solver='adam',
+            alpha=0.0001,
+            batch_size='auto',
+            learning_rate='constant',
+            learning_rate_init=0.001,
+            max_iter=1000,
+            random_state=42,
+            early_stopping=True,
+            validation_fraction=0.1,
+            n_iter_no_change=10
+        )
     )
+    
     clf.fit(X_train, y_train)
     
     # Evaluate
