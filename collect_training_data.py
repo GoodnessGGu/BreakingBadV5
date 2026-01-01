@@ -109,90 +109,38 @@ def label_data_binary_strategy(df):
 def collect_data():
     connect_iq()
     
-    # Target and Correlations
-    target_asset = "EURUSD"
-    correlated_assets = ["USDJPY", "GBPUSD", "AUDUSD"] # Assets to use as features
+    # Target Asset Only for Pattern Strategy Test
+    target_asset = "EURUSD-OTC"
     
-    all_assets = [target_asset] + correlated_assets
-    asset_dfs = {}
+    logger.info(f"Fetching data for {target_asset} (Pattern Strategy)...")
     
-    TOTAL_CANDLES = 50000 
+    all_data = []
+    end_time = int(time.time())
+    TOTAL_CANDLES = 15000 # Enough for RF
     
-    # 1. Fetch Data for ALL assets
-    for asset in all_assets:
-        logger.info(f"Fetching data for {asset}...")
+    current_candles = []
+    
+    while len(current_candles) < TOTAL_CANDLES:
+        candles = get_candles(target_asset, timeframe=300, amount=1000, endtime=end_time)
+        if not candles: break
         
-        asset_candles = []
-        end_time = time.time()
+        current_candles = candles + current_candles
+        end_time = candles[0]['from'] - 1
+        logger.info(f"Collected {len(current_candles)} candles...")
+        time.sleep(0.2)
         
-        while len(asset_candles) < TOTAL_CANDLES:
-            candles = get_candles(asset, timeframe=300, amount=1000, endtime=end_time)
-            
-            if not candles:
-                logger.warning(f"No more candles for {asset}")
-                break
-            
-            asset_candles = candles + asset_candles
-            new_end_time = candles[0]['from']
-            
-            if new_end_time >= end_time:
-                 break
-            end_time = new_end_time
-            
-            logger.info(f"  {asset}: {len(asset_candles)} / {TOTAL_CANDLES}")
-            time.sleep(0.2)
-            
-        # Create DataFrame
-        df = pd.DataFrame(asset_candles)
-        if df.empty:
-            logger.error(f"Failed to fetch data for {asset}")
-            return
-
-        df = df.drop_duplicates(subset=['from']).sort_values(by='from').reset_index(drop=True)
-        
-        # Standardize time
-        if 'from' in df.columns:
-            df['time'] = pd.to_datetime(df['from'], unit='s')
-            
-        # Calculate Basic Indicators per Asset (RSI, etc)
-        # We need these features for the correlated assets too!
-        # But prepare_features might drop 'time' or 'from', so be careful.
-        # We want to keep 'time' for merging.
-        
-        # Let's simple rename raw columns for correlated assets
-        if asset != target_asset:
-            # Keep only useful columns for correlation: Close, Open, Min, Max, Volume
-            cols_to_keep = ['time', 'open', 'close', 'min', 'max', 'volume']
-            df = df[cols_to_keep]
-            
-            # Rename columns: e.g. open -> USDJPY_open
-            rename_map = {c: f"{asset}_{c}" for c in df.columns if c != 'time'}
-            df = df.rename(columns=rename_map)
-            
-        asset_dfs[asset] = df
-        
-    # 2. Merge DataFrames on 'time'
-    logger.info("Merging Correlation Data...")
-    final_df = asset_dfs[target_asset]
+    df = pd.DataFrame(current_candles)
+    if 'from' in df.columns:
+         df['time'] = pd.to_datetime(df['from'], unit='s')
+         
+    # Prepare Features (Triggering the new Pattern Logic)
+    df = prepare_features(df)
     
-    for asset in correlated_assets:
-        if asset in asset_dfs:
-            # Inner join to ensure we only train on rows where we have ALL data (synchronous)
-            final_df = pd.merge(final_df, asset_dfs[asset], on='time', how='inner')
-            
-    logger.info(f"Merged Data Shape: {final_df.shape}")
+    # Label Data
+    df = label_data_binary_strategy(df)
     
-    # 3. Feature Engineering (Target Asset)
-    # The 'prepare_features' might expect specific column names (open, close...) which EURUSD still has.
-    final_df = prepare_features(final_df)
-    
-    # 4. Generate Target Label (Outcome)
-    final_df = label_data_binary_strategy(final_df)
-    
-    # 5. Save
-    final_df['asset'] = target_asset
-    final_df.to_csv("training_data.csv", index=False)
-    logger.info(f"✅ Saved Wide-Dataset to training_data.csv ({len(final_df)} rows)")
+    df.to_csv("training_data.csv", index=False)
+    logger.info("Saved data for RF training.")
 
 if __name__ == "__main__":
     collect_data()

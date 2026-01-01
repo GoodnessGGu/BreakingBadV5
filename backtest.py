@@ -55,8 +55,9 @@ def apply_strategy(df):
     # Since analyze_strategy does `df = pd.DataFrame(candles_data)`, passing a list of dicts is safer/standard.
     records = df.to_dict('records')
     
-    print("Analyzing candles...")
+    logger.info("Analyzing candles...")
     for i in range(min_candles, len(df)):
+        if i % 50 == 0: logger.info(f"Processing candle {i}/{len(df)}")
         # Pass the history up to index 'i' (inclusive)
         # We need to simulate that 'i' is the *current forming* candle or the *just closed* candle?
         # In live trading, we usually analyze closed candles or the current forming one.
@@ -146,16 +147,16 @@ async def run_backtest(api_input=None):
     
     logger.info("✅ Connected to IQ Option API (PRACTICE)")
     
-    assets = ["GBPUSD-OTC", "EURUSD-OTC", "EURGBP-OTC"]
-    timeframe = 60 
-    count = 1000   
+    assets = ["EURUSD-OTC"]
+    timeframe = 300 # 5 minutes
+    count = 1000 # Reduced from 3000 for speed
     
     for asset in assets:
         logger.info(f"\n --- STARTING BACKTEST FOR {asset} ---")
         df = await fetch_historical_data(api, asset, timeframe, count)
         if df is None: continue
             
-        max_gales = 0  # No Martingale (XGBoost Precision Mode)
+        max_gales = 0  # Disable Martingale for raw strategy test
         
         df = apply_strategy(df)
         df = simulate_trades(df, max_gales=max_gales)

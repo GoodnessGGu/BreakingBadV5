@@ -1,209 +1,107 @@
 import pandas as pd
 import numpy as np
 import logging
-from ml_utils import load_model, predict_signal, prepare_features
-from ml_lstm import predict_lstm, SEQ_LENGTH
 from settings import config
 
 logger = logging.getLogger(__name__)
 
-# Load AI Model
-try:
-    ai_model = load_model()
-    if ai_model:
-        logger.info("AI Model loaded successfully.")
-    else:
-        logger.warning("⚠️ No AI model found. AI filtering disabled.")
-except Exception as e:
-    logger.error(f"Failed to load AI model: {e}")
-    ai_model = None
-
-def reload_ai_model():
-    """Reloads the AI model from disk."""
-    global ai_model
-    try:
-        new_model = load_model()
-        if new_model:
-            ai_model = new_model
-            logger.info("🧠 AI Model Reloaded Successfully!")
-            return True
-        else:
-            logger.warning("⚠️ Failed to load new AI model (None returned).")
-            return False
-    except Exception as e:
-        logger.error(f"❌ Error reloading AI model: {e}")
-        return False
-
-# --- Pattern Recognition Configuration (Modular) ---
+# --- Pattern Recognition Configuration (Dummy for imports) ---
 PATTERN_CONFIG = {
     'engulfing': True,
-    'pinbar': True,
-    'star': True,
-    'exhaustion': True,
-    '3soldiers': True,
-    'tweezer': False,
-    'inside': False,
-    'piercing': False,
-    'marubozu': True
+    'pinbar': False,
+    'marubozu': False
 }
 
-def analyze_strategy(candles_data, use_ai=True):
+def analyze_strategy(candles_data):
     """
-    Analyzes candle data and returns a signal ('CALL', 'PUT', or None)
-    based on Modular Candlestick Patterns + AI Confirmation.
+    Analyzes candle data using ONLY the 'New Script' logic (SMA 3, 7, 200 + Engulfing).
+    No AI, No ML features, No heavy processing.
     """
-    if not candles_data or len(candles_data) < 35:
+    if not candles_data or len(candles_data) < 200:
+        # Need enough data for SMA 200
         return None
 
-    # Convert list of dicts to DataFrame
-    df = pd.DataFrame(candles_data)
-
-    # Standardize timestamp column to 'time'
-    if 'time' not in df.columns:
-        if 'from' in df.columns:
-             df['time'] = df['from']
-        elif 'at' in df.columns:
-             df['time'] = df['at']
-
-    if 'time' in df.columns:
-        df['time'] = pd.to_datetime(df['time'], unit='s')
+    # Optimize: We only need the last 205 candles to calculate SMA 200 for the last few points
+    # Passing 3000 candles creates a massive generic DF.
+    # We'll take the whole list for now, but DF creation is fast enough for 3000 rows if we don't do complex features.
     
-    # Ensure numeric columns
-    cols = ['open', 'close', 'min', 'max']
-    for c in cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c])
-            
-    # --- Strategy: Modular Pattern Recognition ---
-    
-    # 1. Feature Engineering (Detects patterns)
     try:
-        df_features = prepare_features(df)
-        if df_features.empty:
+        # Create DataFrame
+        df = pd.DataFrame(candles_data)
+        
+        # Standardize Columns
+        cols = ['open', 'close', 'min', 'max', 'volume']
+        for c in cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c])
+        
+        # Calculate Indicators (Lightweight)
+        # Strategy: 
+        # Fast MAP = 3, Slow MAP = 7, Trend MAP = 200
+        # CALL: Green Candle, Prev Red, Engulfing, Close > SMA3 & SMA7 & SMA200
+        # PUT: Red Candle, Prev Green, Engulfing, Close < SMA3 & SMA7 & SMA200
+        
+        df['sma_3'] = df['close'].rolling(window=3).mean()
+        df['sma_7'] = df['close'].rolling(window=7).mean()
+        df['sma_200'] = df['close'].rolling(window=200).mean()
+        
+        # Get last 2 rows
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        # Validate SMAs exist (not NaN)
+        if pd.isna(curr['sma_200']):
             return None
+            
+        # Parse Values
+        close_curr = curr['close']
+        open_curr = curr['open']
+        close_prev = prev['close']
+        open_prev = prev['open']
         
-        # Get latest fully closed candle analysis (since we trade on Close)
-        # Actually pattern detection uses current row (which may be closed candle in backtest)
-        # In live trading, we pass closed candles.
-        curr = df_features.iloc[-1]
+        sma3 = curr['sma_3']
+        sma7 = curr['sma_7']
+        sma200 = curr['sma_200']
         
-    except Exception as e:
-        logger.error(f"Feature calculation failed: {e}")
-        return None
-
-    signal = None
-
-    # 2. Iterate Configured Patterns
-    # If ANY enabled pattern triggers, we take the signal.
-    # Priority: If multiple patterns conflicts, we can default to None or prioritize specific ones.
-    # Here: First match wins (or we can sum up scores if we wanted).
-    
-    triggered_pattern = None
-    
-    # Map pattern columns to our config keys
-    # Column format: 'pattern_name' -> Config key: 'name'
-    for key, enabled in PATTERN_CONFIG.items():
-        if enabled:
-            col_name = f'pattern_{key}'
-            if col_name in curr:
-                val = curr[col_name]
-                if val == 1:
-                    signal = "CALL"
-                    triggered_pattern = key
-                    break # Stop at first detected pattern
-                elif val == -1:
-                    signal = "PUT"
-                    triggered_pattern = key
-                    break # Stop at first detected pattern
-
-    if not signal:
-        return None
-
-    # logger.info(f"Pattern Detected: {triggered_pattern} -> {signal}")
-
-    # --- AI Confirmation ---
-    if signal and ai_model and use_ai:
-        try:
-            # We already have df_features
-            current_features = df_features.iloc[[-1]]
-            
-            # Encode direction for AI (1=CALL, -1=PUT)
-            dir_val = 1 if signal == "CALL" else -1
-            
-            prediction = 0
-            if config.model_type == "LSTM":
-                # LSTM needs Sequence [1, 10, Features]
-                # We need the last 10 'closed' candles.
-                # Since df contains 'current' in backtesting it might be fine, but we need 10 rows.
-                if len(df_features) >= SEQ_LENGTH:
-                    window = df_features.iloc[-SEQ_LENGTH:]
-                    prediction = predict_lstm(window)
-                else:
-                    logger.warning("Not enough data for LSTM sequence.")
-            else:
-                # XGBoost (Default)
-                prediction = predict_signal(ai_model, current_features, direction=dir_val)
-            
-            if prediction == 0: # 0 = Loss/Reject
-                logger.info(f"[{config.model_type}] REJECTED {signal} ({triggered_pattern})")
-                return None
-            else:
-                logger.info(f"[{config.model_type}] APPROVED {signal} ({triggered_pattern}).")
+        # Candle Colors
+        is_green = close_curr > open_curr
+        is_red = close_curr < open_curr
+        prev_is_green = close_prev > open_prev
+        prev_is_red = close_prev < open_prev
+        
+        # Engulfing (Body Size)
+        body_curr = abs(close_curr - open_curr)
+        body_prev = abs(close_prev - open_prev)
+        is_engulfing = body_curr > body_prev
+        
+        # Check Strategy Conditions
+        signal = None
+        
+        # CALL SIGNAL
+        # Logic: Green, Prev Red, Engulfing, Above ALL SMAs
+        if is_green and prev_is_red and is_engulfing:
+            if close_curr > sma3 and close_curr > sma7 and close_curr > sma200:
+                signal = "CALL"
+        
+        # PUT SIGNAL
+        # Logic: Red, Prev Green, Engulfing, Below ALL SMAs
+        elif is_red and prev_is_green and is_engulfing:
+            if close_curr < sma3 and close_curr < sma7 and close_curr < sma200:
+                signal = "PUT"
                 
-        except Exception as e:
-            logger.error(f"AI Prediction failed: {e}")
-            pass
+        return signal
 
-    return signal
+    except Exception as e:
+        logger.error(f"Strategy Error: {e}")
+        return None
 
 def confirm_trade_with_ai(candles_data, direction):
     """
-    Checks if the AI model 'approves' a trade for a given direction.
+    Dummy function to satisfy imports. 
+    Always returns True since AI is disabled for this strategy.
     """
-    if not ai_model:
-        return True 
-        
-    try:
-        df = pd.DataFrame(candles_data)
-        
-        # Standardize timestamp column to 'time'
-        if 'time' not in df.columns:
-            if 'from' in df.columns:
-                df['time'] = df['from']
-            elif 'at' in df.columns:
-                df['time'] = df['at']
-                
-        if 'time' in df.columns:
-            df['time'] = pd.to_datetime(df['time'], unit='s')
-        else:
-            logger.warning("Missing timestamp in candle data.")
-            
-        df['close'] = pd.to_numeric(df['close'])
-        df['open'] = pd.to_numeric(df['open'])
-        df['min'] = pd.to_numeric(df['min'])
-        df['max'] = pd.to_numeric(df['max'])
-        
-        df_features = prepare_features(df)
-        
-        if df_features.empty:
-            return True 
-            
-        current_features = df_features.iloc[[-1]]
-        
-        # Encode direction (Assuming direction string like 'CALL' or 'PUT')
-        dir_val = 1 if 'CALL' in str(direction).upper() else -1
-        
-        prediction = predict_signal(ai_model, current_features, direction=dir_val)
-        
-        if prediction == 0:
-            logger.info(f"[AI] REJECTED external {direction} signal.")
-            return False
-            
-        logger.info(f"[AI] APPROVED external {direction} signal.")
-        return True
-        
-    except Exception as e:
-        logger.error(f"AI Confirmation Error: {e}")
-        return True 
-    
-    return None
+    return True
+
+def reload_ai_model():
+    # Placeholder to prevent import errors in main
+    pass

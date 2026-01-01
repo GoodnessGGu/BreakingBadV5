@@ -613,7 +613,7 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
             
             # Fetch candles (Need enough for MA34 + buffer)
             # Assuming api.get_candles returns list of dicts
-            candles = api.get_candle_history(asset, 200, tf_seconds)
+            candles = api.get_candle_history(asset, 300, tf_seconds)
             
             signal = analyze_strategy(candles)
             

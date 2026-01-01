@@ -96,7 +96,54 @@ def train_model(data_path="training_data.csv"):
         
     joblib.dump(clf, MODEL_PATH)
     logger.info(f"Model saved to {MODEL_PATH}")
+    joblib.dump(clf, MODEL_PATH)
+    logger.info(f"Model saved to {MODEL_PATH}")
     return clf
+
+def train_rf_model(data_path="training_data.csv"):
+    """
+    Trains a Random Forest model specifically on Pattern Features.
+    """
+    from sklearn.ensemble import RandomForestClassifier
+    
+    if not os.path.exists(data_path):
+        return
+        
+    df = pd.read_csv(data_path)
+    if 'outcome' not in df.columns: return
+    
+    # 1. Select ONLY Pattern Columns + Basic Indicators for RF
+    # The hypothesis: Patterns work better when combined with RSI/Bollinger Context.
+    pattern_cols = [c for c in df.columns if 'pattern_' in c]
+    context_cols = ['rsi', 'dist_sma_20', 'bb_pos', 'adx']
+    
+    features = pattern_cols + context_cols
+    
+    # Filter features that actually exist
+    valid_features = [c for c in features if c in df.columns]
+    
+    X = df[valid_features]
+    y = df['outcome']
+    
+    # Clean NaNs
+    X = X.dropna()
+    y = y.loc[X.index]
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    logger.info(f"Training Random Forest on {len(valid_features)} features: {valid_features}")
+    
+    rf = RandomForestClassifier(n_estimators=200, max_depth=10, random_state=42)
+    rf.fit(X_train, y_train)
+    
+    acc = accuracy_score(y_test, rf.predict(X_test))
+    logger.info(f"RF Model Accuracy: {acc:.2f}")
+    
+    # Save as separate model
+    RF_PATH = os.path.join(MODELS_DIR, "rf_pattern_model.pkl")
+    joblib.dump(rf, RF_PATH)
+    logger.info(f"RF Model saved to {RF_PATH}")
+    return rf
 
 # --- Indicators ---
 def calculate_rsi(series, period=14):
@@ -212,6 +259,11 @@ def prepare_features(df):
     # Don't feed raw 1.0500 vs 1.2000. Feed "Price is 0.5% above SMA"
     df['sma_20'] = df['close'].rolling(window=20).mean()
     df['sma_50'] = df['close'].rolling(window=50).mean()
+    
+    # New Script Requirements
+    df['sma_3'] = df['close'].rolling(window=3).mean()
+    df['sma_7'] = df['close'].rolling(window=7).mean()
+    df['sma_200'] = df['close'].rolling(window=200).mean()
     
     df['dist_sma_20'] = (df['close'] - df['sma_20']) / df['close'] * 100
     df['dist_sma_50'] = (df['close'] - df['sma_50']) / df['close'] * 100
@@ -372,21 +424,62 @@ def prepare_features(df):
     df.loc[is_inside_up, 'pattern_inside'] = 1
     df.loc[is_inside_down, 'pattern_inside'] = -1
 
-    # 9. Exhaustion (Mean Reversal - Small then Big)
-    # Logic: 
-    # 1. Two consecutive candles of SAME COLOR.
-    # 2. Body of Current >= 2 * Body of Previous.
-    # 3. Signal is REVERSAL (Call if Red-Red, Put if Green-Green).
+    # 9. Exhaustion (Momentum) Strategy
+    # User Spec:
+    # BUY: Two Red Candles. 2nd is >= 2x larger than 1st. Filter: Close within 5% of Support.
+    # SELL: Two Green Candles. 2nd is >= 2x larger than 1st. Filter: Close within 5% of Resistance.
     
-    prev_body = (prev_close - prev_open).abs()
-    curr_body = (curr_close - curr_open).abs()
+    # "Support" = Lower BB (approximated here for simplicity).
+    # "Resistance" = Upper BB.
     
-    is_exhaustion_call = prev_is_red & is_red & (curr_body >= (2 * prev_body))
-    is_exhaustion_put = prev_is_green & is_green & (curr_body >= (2 * prev_body))
+    prev_body = abs(df['close'].shift(1) - df['open'].shift(1))
+    curr_body = abs(df['close'] - df['open'])
+    
+    # Identify Momentum (2x Size + Same Color)
+    is_red_momentum = prev_is_red & is_red & (curr_body >= (2 * prev_body))
+    is_green_momentum = prev_is_green & is_green & (curr_body >= (2 * prev_body))
+    
+    # Identify S/R Proximity (5% Tolerance relative to Bollinger Band Width?)
+    # User said "5% margin of known Support". 
+    # Let's assume margin = 5% of the Price itself (huge) or 5% of the Channel?
+    # Usually "within 5% of price" is massive. 
+    # Interpretation: Close is within [Support * 1.0005] or something?
+    # Logic: abs(Close - Support) <= (Price * 0.0005) (5 pips?)
+    # Let's use: abs(Close - Band) / Close <= 0.001 (0.1%)
+    # "5% margin" might mean "5% of the chart range" or "5 pips". 
+    # Let's use a dynamic threshold: 5% of the ATR (Average True Range).
+    # A standard "touch" is often considered if price is within 1 ATR or similar.
+    # Let's use: (Distance to Band) < (Body Size * 0.5) OR fixed percentage 0.05%?
+    # User said: "5% margin". 
+    # Let's try: abs(Close - LowerBB) <= (Close * 0.0005)
+    
+    # Let's calculate distance to bands
+    dist_to_lower = abs(df['close'] - df['bb_lower'])
+    dist_to_upper = abs(df['close'] - df['bb_upper'])
+    
+    # Threshold: 5% of the candle's body? Or 5% of the range?
+    # "5% margin" usually implies 0.05 * Price (500 pips - too big).
+    # Maybe 5% of the Average Daily Range?
+    # Let's use ATR. if dist < (ATR * 0.2) it's extremely close.
+    # User prompt: "within a 5% margin of a known Support level".
+    # Interpretation: If Support is 100, Margin is 95-105? No, that's broad.
+    # Let's assume "Proximity" filter.
+    # I will use a relative threshold: Distance < 0.2 * ATR (20% of an average candle).
+    
+    filter_tolerance = df['atr'] * 0.5 
+    
+    near_support = dist_to_lower <= filter_tolerance
+    near_resistance = dist_to_upper <= filter_tolerance
     
     df['pattern_exhaustion'] = 0
-    df.loc[is_exhaustion_call, 'pattern_exhaustion'] = 1   # Signal CALL
-    df.loc[is_exhaustion_put, 'pattern_exhaustion'] = -1  # Signal PUT
+    
+    # Buy Signal: Red Momentum + Near Support
+    mask_buy = is_red_momentum & near_support
+    df.loc[mask_buy, 'pattern_exhaustion'] = 1 
+    
+    # Sell Signal: Green Momentum + Near Resistance
+    mask_sell = is_green_momentum & near_resistance
+    df.loc[mask_sell, 'pattern_exhaustion'] = -1
 
     # 5. Lagged Features (Percent Change)
     for lag in [1, 2, 3]:
@@ -413,6 +506,58 @@ def load_model():
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
     return None
+
+def load_rf_model():
+    """Loads the trained Random Forest model."""
+    RF_PATH = os.path.join(MODELS_DIR, "rf_pattern_model.pkl")
+    if os.path.exists(RF_PATH):
+        try:
+            return joblib.load(RF_PATH)
+        except Exception as e:
+            logger.error(f"Failed to load RF model: {e}")
+    return None
+
+def predict_rf_signal(model, features_df):
+    """
+    Predicts using the Random Forest model.
+    Expected features: patterns + context only.
+    """
+    if model is None: return 1
+    
+    try:
+        # Define features expected by RF (Must match training!)
+        pattern_cols = [c for c in features_df.columns if 'pattern_' in c]
+        context_cols = ['rsi', 'dist_sma_20', 'bb_pos', 'adx']
+        required_features = pattern_cols + context_cols
+        
+        # Filter input df
+        # Note: If train_rf_model selected specific columns, we should dynamically access them 
+        # via model.feature_names_in_ if available.
+        
+        X = features_df.copy()
+        
+        if hasattr(model, "feature_names_in_"):
+            # Fill missing with 0 and select exact columns
+            missing = set(model.feature_names_in_) - set(X.columns)
+            for c in missing:
+                X[c] = 0
+            X = X[model.feature_names_in_]
+        else:
+            # Fallback
+            valid_cols = [c for c in required_features if c in X.columns]
+            X = X[valid_cols]
+            
+        prediction = model.predict(X) # Returns [1] or [0] (or -1 if encoded that way?)
+        # Our training Labels were derived from 'outcome' which is 0 or 1.
+        # But wait, did we encode outcome as 1/0? Yes, label_data_binary_strategy does that.
+        
+        return prediction[0]
+        
+    except Exception as e:
+        logger.error(f"RF Prediction Error: {e}")
+        return 1 # Fallback to Allow Trade if AI fails? Or 0 to Block? 
+                 # Let's return 0 to be safe.
+        return 0
 
 def predict_signal(model, features_df, direction=None):
     """
