@@ -268,23 +268,22 @@ class TradeManager:
             order_data = self.message_handler.position_info.get(order_id, {})
             
             # Check if Closed or Time Elapsed significantly (>5s past expiry)
-            # This 'expected_end' needs to be derived. 
-            # We don't have exact expiry time variable here, but we know 'expiry' duration.
-            # Assuming 'start_time' matches roughly expiry start? No.
-            # We can use server_time logic but simplified:
-            # If (current time > start + expiry + 5) AND status != closed -> Force Check
-            
-            is_closed = order_data and (order_data.get("status") == "closed" or order_data.get("close_time"))
+            is_closed = order_data and (order_data.get("status") == "closed")
+            # Only consider close_time if status is explicitly closed or we have a clear result
+            if order_data and order_data.get("close_time") and not is_closed:
+                 # Check if close_time is valid (not 0) and in past
+                 ct = int(order_data.get("close_time", 0))
+                 if ct > 0 and (ct / 1000) < time.time():
+                      is_closed = True
+
             force_check = False
             
             # Approximate elapsed time since check started
-            # Note: 'expiry' arg is duration (e.g. 60). 
-            # If we called this *after* trade placed, we might wait up to 60s?
-            # Usually this method is called immediately after placement.
-            # So 'start_time + expiry' is roughly the close time.
             time_since_start = time.time() - start_time
+            
             # Active Polling (Fallback if socket is silent for > 5s after expiry)
-            if not is_closed and time_since_start > (int(expiry) * 60 + 3) and not force_check:
+            # Only start polling AFTER the trade should have expired
+            if not is_closed and time_since_start > (int(expiry) * 60 + 5) and not force_check:
                  logger.info(f"🕵️ Binary Result Polling: Fetching history for {order_id}...")
                  try:
                      # Fetch recent 10 positions (Turbo/Binary)
@@ -293,26 +292,33 @@ class TradeManager:
                      )
                      if history:
                          for pos in history:
-                             # Match by ID (External ID or ID)
-                             # Some responses use 'id', others 'external_id'
                              p_id = str(pos.get("id"))
                              p_ext = str(pos.get("external_id"))
                              tgt = str(order_id)
                              
                              if tgt == p_id or tgt == p_ext:
                                  # Found it!
-                                 order_data = pos
-                                 is_closed = True # It's in history, so it's closed
+                                 # IMPORTANT: Just because it's in history doesn't mean it's closed (sometimes active trades appear)
+                                 # Check status specifically
+                                 h_status = pos.get("status", "")
+                                 if h_status == "closed":
+                                     order_data = pos
+                                     is_closed = True 
+                                     logger.info(f"✅ Found CLOSED trade {order_id} in history via polling.")
+                                 else:
+                                     # Still open, update our local data but don't mark closed
+                                     order_data = pos
+                                     logger.info(f"ℹ️ Found active trade {order_id} in history (Status: {h_status}). Waiting...")
+                                 
                                  # Standardize for logic below
                                  if "win" not in order_data:
                                      order_data["win"] = order_data.get("close_reason", "")
-                                 
-                                 logger.info(f"✅ Found trade {order_id} in history via polling.")
                                  break
                  except Exception as e:
                      logger.warning(f"Polling failed: {e}")
 
-            if not is_closed and time_since_start > (int(expiry) * 60 + random.randint(10, 20)):
+            # Force check (Shadow) only after significant delay (e.g. 15s+ past expiry)
+            if not is_closed and time_since_start > (int(expiry) * 60 + random.randint(15, 25)):
                 force_check = True
                 logger.warning(f"⚠️ Trade {order_id} server timeout (>15s delay). Forcing Shadow Verification.")
             
