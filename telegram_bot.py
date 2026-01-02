@@ -618,6 +618,25 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
             signal = analyze_colormillion(candles, asset_name=asset)
             
             if signal:
+                # --- AI FILTER INTEGRATION ---
+                if config.use_ai_filter:
+                    logger.info(f"🧠 Verifying {signal} signal for {asset} with AI...")
+                    # We need the candles for feature generation
+                    # The 'candles' variable here is already a list of dicts from api.get_candle_history
+                    from strategies import confirm_trade_with_ai
+                    
+                    is_confirmed = confirm_trade_with_ai(candles, signal)
+                    
+                    if not is_confirmed:
+                        logger.info(f"🛑 Trade Suppressed by AI: {asset} {signal}")
+                        # Optional: Notify user of suppression?
+                        # await context.bot.send_message(chat_id=chat_id, text=f"🧠 AI Denied: {asset} {signal}")
+                        await asyncio.sleep(5) 
+                        continue # Skip this trade
+                    else:
+                         logger.info(f"✅ AI Confirmed: {asset} {signal}")
+                # -----------------------------
+
                 msg = f"🎯 Strategy Signal found for *{asset}*: *{signal}*\n🚀 Executing trade..."
                 logger.info(f"🎯 Strategy Signal found for {asset}: {signal}")
                 try:

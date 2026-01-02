@@ -106,16 +106,88 @@ def analyze_strategy(candles_data, asset_name=None):
         logger.error(f"Strategy Error: {e}")
         return None
 
-def confirm_trade_with_ai(candles_data, direction):
-    """
-    Dummy function to satisfy imports. 
-    Always returns True since AI is disabled for this strategy.
-    """
-    return True
+from ml_utils import load_model, prepare_features, predict_signal
+from ml_lstm import predict_lstm, get_model_and_scaler
+
+# Cache for loaded models to avoid disk I/O on every tick
+CACHED_MODEL = None
 
 def reload_ai_model():
-    # Placeholder to prevent import errors in main
-    pass
+    """Forces reload of the AI model from disk."""
+    global CACHED_MODEL
+    CACHED_MODEL = load_model()
+    logger.info("🧠 AI Model Reloaded via Strategy.")
+
+def confirm_trade_with_ai(candles_data, direction):
+    """
+    Validates a signal using the trained Machine Learning Model.
+    
+    Args:
+        candles_data (list): List of candle dictionaries (must be enough for features like RSI/SMA)
+        direction (str): 'CALL' or 'PUT'
+        
+    Returns:
+        bool: True if AI approves (or AI is disabled/failed), False if AI rejects.
+    """
+    global CACHED_MODEL
+    
+    if not candles_data:
+        return True # Default to allow if no data
+        
+    try:
+        # Convert to DataFrame
+        df = pd.DataFrame(candles_data)
+        
+        # 1. Generate Technical Features
+        # Note: prepare_features expects standard columns
+        features_df = prepare_features(df)
+        
+        # We need the last row to predict (the current market state)
+        last_row = features_df.tail(1)
+        
+        # 2. Select Model based on Config
+        if config.model_type == "LSTM":
+            # LSTM needs a sequence (e.g. last 10 candles)
+            # We assume prepare_sequences logic is handled inside predict_lstm or we pass a window
+            # predict_lstm expects a DataFrame window of 10 candles
+            window = df.tail(10)
+            if len(window) < 10:
+                logger.warning("⚠️ Not enough data for LSTM (Need 10 candles). AI Skipped.")
+                return True
+                
+            prediction = predict_lstm(window)
+            is_approved = (prediction == 1)
+            
+            if not is_approved:
+                logger.info(f"🧠 LSTM Rejected Signal: {direction}")
+            else:
+                logger.info(f"🧠 LSTM Approved Signal: {direction}")
+                
+            return is_approved
+            
+        else:
+            # XGBoost / Random Forest
+            if CACHED_MODEL is None:
+                CACHED_MODEL = load_model()
+                
+            if CACHED_MODEL is None:
+                logger.warning("⚠️ No AI Model found. Skipping AI Check.")
+                return True # Fail open (allow trade)
+            
+            # Predict
+            # 1 = Win, 0 = Loss
+            decision = predict_signal(CACHED_MODEL, last_row, direction)
+            
+            if decision == 1:
+                logger.info(f"🧠 AI Approved {direction} (Confidence High)")
+                return True
+            else:
+                logger.info(f"🧠 AI Rejected {direction} (Low Probability)")
+                return False
+                
+    except Exception as e:
+        logger.error(f"AI Confirmation Failed: {e}", exc_info=True)
+        return True # Fail open to ensure trading continues if AI bugs out
 
 def analyze_colormillion(candles_data, asset_name=None):
     """
